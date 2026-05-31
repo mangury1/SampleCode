@@ -217,8 +217,7 @@ public class SceneChangeManager : MonoBehaviour
              || sceneName == Constant.S_EMPTY_SCENE_NAME)
             {
                 SceneManager.LoadScene(_nextSceneName);
-                // 기존: while (true) yield return null
-                // 변경: 취소 신호가 올 때까지 1프레임씩 대기
+                
                 await UniTask.WaitUntilCanceled(ct);
                 return;
             }
