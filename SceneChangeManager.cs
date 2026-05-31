@@ -1,0 +1,376 @@
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+
+public enum CHANGE_GAME_SCENE_TYPE
+{
+    WAITING_ROOM, // 대기방으로 이동
+    PLAY_GAME     // 게임으로 바로 이동
+}
+
+
+public class SceneChangeManager : MonoBehaviour
+{
+    protected readonly WaitForSeconds SLEEP_TIME = new WaitForSeconds(1);
+
+    private IEnumerator _process = null;
+    private AsyncOperation _async = null;
+    private AsyncOperation _loadingSceneAsync = null;
+
+    private string _nextSceneName = string.Empty;
+
+    /// <summary>현재 씬 이름 (직접 추적)</summary>
+    public string CurrentSceneName { get; private set; }
+
+    /// <summary>Unity가 인식하는 현재 씬 이름</summary>
+    public string UnityActiveSceneName
+    {
+        get { return SceneManager.GetActiveScene().name; }
+    }
+
+    public AsyncOperation GetLoadingSceneAsync { get { return _loadingSceneAsync; } }
+
+    private static SceneChangeManager _instance;
+    public static SceneChangeManager Instance
+    {
+        get
+        {
+            if (null == _instance)
+            {
+                GameObject obj = GameObject.Find(typeof(SceneChangeManager).Name);
+                if (null == obj)
+                {
+                    obj = new GameObject(typeof(SceneChangeManager).Name);
+                    _instance = obj.AddComponent<SceneChangeManager>();
+                }
+                else
+                {
+                    _instance = obj.GetComponent<SceneChangeManager>();
+                }
+
+                DontDestroyOnLoad(_instance.gameObject);
+            }
+
+            return _instance;
+        }
+    }
+
+
+    private Dictionary<string, BaseSceneScripts> _sceneScriptsList = null;
+    private Coroutine _checkLoadScene = null;
+
+    /// <summary>진입할 게임 씬 타입</summary>
+    public CHANGE_GAME_SCENE_TYPE ChangeGameSceneType { get; private set; }
+
+    private void Awake()
+    {
+        if (_instance != null && _instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+
+        _instance = this;
+        DontDestroyOnLoad(gameObject);
+
+        InitSceneScriptsList();
+    }
+
+    private void OnDestroy()
+    {
+        DestroySceneScriptsList();
+
+        if (null != _checkLoadScene)
+        {
+            StopCoroutine(_checkLoadScene);
+            _checkLoadScene = null;
+        }
+    }
+
+    // 씬 스크립트 등록 
+    private void InitSceneScriptsList()
+    {
+        if (_sceneScriptsList != null)
+            DestroySceneScriptsList();
+
+        _sceneScriptsList = new Dictionary<string, BaseSceneScripts>();
+    }
+
+    private void DestroySceneScriptsList()
+    {
+        if (_sceneScriptsList == null) return;
+
+        foreach (var pair in _sceneScriptsList)
+        {
+            pair.Value.Release();
+        }
+
+        _sceneScriptsList.Clear();
+        _sceneScriptsList = null;
+    }
+
+    // 씬 스크립트 등록
+    public void RegisterSceneScript<T>(string sceneName) where T : BaseSceneScripts, new()
+    {
+        if (_sceneScriptsList.ContainsKey(sceneName))
+            return;
+
+        T script = new T();
+        script.Initialze(sceneName);
+        _sceneScriptsList.Add(sceneName, script);
+    }
+
+
+    // 씬 스크립트를 인스턴스로 직접 등록
+    public void RegisterSceneScript(string sceneName, BaseSceneScripts script)
+    {
+        if (_sceneScriptsList.ContainsKey(sceneName))
+            return;
+
+        script.Initialze(sceneName);
+        _sceneScriptsList.Add(sceneName, script);
+    }
+
+    public S GetSceneScripts<S>(string sceneName) where S : BaseSceneScripts
+    {
+        if (_sceneScriptsList != null && _sceneScriptsList.ContainsKey(sceneName))
+            return _sceneScriptsList[sceneName] as S;
+
+        return null;
+    }
+
+    // ---------------------------------------------------------------
+    // 씬 상태 조회
+    // ---------------------------------------------------------------
+
+    public void SetChangeGameSceneType(CHANGE_GAME_SCENE_TYPE type)
+    {
+        ChangeGameSceneType = type;
+    }
+
+    public bool CheckMatchGame()
+    {
+        return ChangeGameSceneType == CHANGE_GAME_SCENE_TYPE.PLAY_GAME;
+    }
+
+    public bool CheckScene(string sceneName)
+    {
+        return string.Equals(CurrentSceneName, sceneName);
+    }
+
+    public bool CheckOutGameScene()
+    {
+        return CheckScene(Constant.S_MAIN_ROOM_NAME)
+            || CheckScene(Constant.S_CLIENT_ASSET_NAME)
+            || CheckScene(Constant.S_CLIENT_NAME);
+    }
+
+    // 일반 씬 전환
+    public void SceneChange(string sceneName, string scriptsName = null)
+    {
+        if (!string.IsNullOrEmpty(scriptsName))
+            Debug.LogWarning("__ !! SceneChange ScriptsName = " + scriptsName);
+
+        if (string.IsNullOrEmpty(sceneName))
+            return;
+
+        _nextSceneName = sceneName;
+
+        GameUIManager.instance.GetWindowSceneLoading.StartLoading(true);
+        GameUIManager.instance.DestroyWindow();
+        Resources.UnloadUnusedAssets();
+        System.GC.Collect();
+
+        if (null == _process)
+        {
+            _process = LoadEmptyScene();
+            StartCoroutine(_process);
+        }
+    }
+
+    public void ClientAssetSceneChange(string sceneName)
+    {
+        if (string.IsNullOrEmpty(sceneName))
+            return;
+
+        _nextSceneName = sceneName;
+
+        GameUIManager.instance.DestroyWindow();
+        Resources.UnloadUnusedAssets();
+        System.GC.Collect();
+
+        LoadNextScene();
+    }
+
+    public void SceneChangeAdditive(string sceneName)
+    {
+        if (null == SceneManager.GetSceneByName(sceneName))
+            SceneManager.LoadScene(sceneName, LoadSceneMode.Additive);
+    }
+
+    public void SceneChangeUnload(string sceneName)
+    {
+        if (null != SceneManager.GetSceneByName(sceneName))
+            SceneManager.UnloadSceneAsync(sceneName);
+    }
+
+    // 내부 씬 전환 흐름
+    private IEnumerator LoadEmptyScene()
+    {
+        string nowSceneName = SceneManager.GetActiveScene().name;
+        if (_sceneScriptsList.ContainsKey(nowSceneName))
+        {
+            yield return StartCoroutine(_sceneScriptsList[nowSceneName].OnEscape());
+        }
+
+        _async = SceneManager.LoadSceneAsync(Constant.S_EMPTY_SCENE_NAME);
+
+        while (null != _async && !_async.isDone)
+            yield return null;
+
+        LoadNextScene();
+    }
+
+    private void LoadNextScene()
+    {
+        _async = null;
+
+        if (null != _process)
+        {
+            StopCoroutine(_process);
+            _process = null;
+        }
+
+        if (string.IsNullOrEmpty(_nextSceneName))
+            return;
+
+        if (null != _checkLoadScene)
+        {
+            StopCoroutine(_checkLoadScene);
+            _checkLoadScene = null;
+        }
+
+        _checkLoadScene = StartCoroutine(CheckLoadScene(_nextSceneName));
+    }
+
+
+    // 씬 로드 및 진입 처리.
+    private IEnumerator CheckLoadScene(string sceneName)
+    {
+        // 로딩 전용 씬은 바로 전환 후 대기
+        if (Constant.S_FIELD_LOADING_SCENE_NAME == sceneName
+            || Constant.S_MAIN_ROOM_LOADING_NAME == sceneName
+            || Constant.S_EMPTY_SCENE_NAME == sceneName)
+        {
+            SceneManager.LoadScene(_nextSceneName);
+
+            while (true)
+                yield return null;
+        }
+
+        _loadingSceneAsync = SceneManager.LoadSceneAsync(sceneName);
+
+        while (null != _loadingSceneAsync && !_loadingSceneAsync.isDone)
+            yield return null;
+
+        // 씬 로드 후 스크립트가 없으면 등록 시도 (하위 호환용)
+        TryAutoRegisterScript(sceneName);
+
+        // 처리가 남아있을 수 있어 1초 대기
+        yield return SLEEP_TIME;
+
+        if (_sceneScriptsList.ContainsKey(sceneName))
+        {
+            yield return StartCoroutine(_sceneScriptsList[sceneName].OnEntry());
+        }
+
+        ApplySceneSettings(sceneName);
+
+        CurrentSceneName = sceneName;
+
+        // 로딩 UI 처리도 씬 스크립트 속성값 기반으로 처리
+        ApplyLoadingUI(sceneName);
+
+        _loadingSceneAsync = null;
+    }
+
+    /// <summary>
+    /// 씬 스크립트의 TouchEffectEnabled 속성을 읽어 터치 이펙트를 설정한다.
+    /// 씬 스크립트가 없으면 기본값(true)을 사용.
+    /// </summary>
+    private void ApplySceneSettings(string sceneName)
+    {
+        bool touchEffectEnabled = true;
+
+        if (_sceneScriptsList.TryGetValue(sceneName, out BaseSceneScripts script))
+        {
+            touchEffectEnabled = script.TouchEffectEnabled;
+        }
+
+        MouseTouchManager.Instance.SetActiveEffect(touchEffectEnabled);
+    }
+
+    /// <summary>
+    /// 씬 스크립트의 LoadingType 속성을 읽어 로딩 UI를 처리한다.
+    /// 네트워크 로비처럼 별도 분기가 필요한 씬은 씬 스크립트에서 LoadingType을 오버라이드.
+    /// </summary>
+    private void ApplyLoadingUI(string sceneName)
+    {
+        SceneLoadingType loadingType = SceneLoadingType.Default;
+
+        if (_sceneScriptsList.TryGetValue(sceneName, out BaseSceneScripts script))
+        {
+            loadingType = script.LoadingType;
+        }
+
+        switch (loadingType)
+        {
+            case SceneLoadingType.None:
+                // 로딩 UI를 끄지 않음 (인게임 씬 등)
+                break;
+
+            case SceneLoadingType.MatchLoading:
+                GameUIManager.instance.GetWindowSceneLoading.StartMatchLoading();
+                break;
+
+            case SceneLoadingType.NormalLoading:
+                GameUIManager.instance.GetWindowSceneLoading.StartLoading();
+                break;
+
+            case SceneLoadingType.Default:
+            default:
+                GameUIManager.instance.GetWindowSceneLoading.EndLoading(true);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// 새로 추가하는 씬은 RegisterSceneScript<T>()를 씬 초기화 시점에 직접 호출할 것.
+    /// 이 메서드는 기존 씬들의 동작을 유지하기 위한 임시 브릿지임.
+    /// </summary>
+    private void TryAutoRegisterScript(string sceneName)
+    {
+        if (_sceneScriptsList.ContainsKey(sceneName))
+            return;
+
+        switch (sceneName)
+        {
+            case Constant.S_CLIENT_NAME:
+                RegisterSceneScript<ClientSceneScripts>(sceneName);
+                break;
+
+            case Constant.S_MAIN_ROOM_NAME:
+                RegisterSceneScript<MainRoomSceneScripts>(sceneName);
+                break;
+
+            case Constant.S_FISHING_GROUND_NAME:
+                RegisterSceneScript<FishingGroundSceneScripts>(sceneName);
+                break;
+            
+            default:
+                SceneChangeManager.Instance.RegisterSceneScript<NewSceneScripts>(Constant.S_NEW_SCENE_NAME);
+                break;           
+        }
+    }
+}
