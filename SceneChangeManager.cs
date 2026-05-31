@@ -16,9 +16,6 @@ public class SceneChangeManager : MonoBehaviour
     private AsyncOperation _loadingSceneAsync = null;
     private string _nextSceneName = string.Empty;
 
-    // ── 코루틴 → CancellationTokenSource 로 교체 ──────────────────────────
-    // 기존: private IEnumerator _process / private Coroutine _checkLoadScene
-    // 변경: 각각 CTS로 관리 → UniTask 취소에 사용
     private CancellationTokenSource _processCts = null;
     private CancellationTokenSource _checkLoadCts = null;
 
@@ -144,8 +141,6 @@ public class SceneChangeManager : MonoBehaviour
         Resources.UnloadUnusedAssets();
         System.GC.Collect();
 
-        // 기존: if (null == _process) { _process = LoadEmptyScene(); StartCoroutine(_process); }
-        // 변경: 이미 실행 중인 태스크가 없을 때만 시작
         if (_processCts == null)
         {
             _processCts = new CancellationTokenSource();
@@ -177,16 +172,8 @@ public class SceneChangeManager : MonoBehaviour
             SceneManager.UnloadSceneAsync(sceneName);
     }
 
-    // ── 내부 씬 전환 흐름 (async/await) ──────────────────────────────────
+    // ── 내부 씬 전환 흐름  ──────────────────────────────────
 
-    /// <summary>
-    /// [기존] private IEnumerator LoadEmptyScene()
-    /// [변경] private async UniTask LoadEmptySceneAsync(CancellationToken ct)
-    ///
-    /// 핵심 변경점:
-    ///   yield return StartCoroutine(OnEscape()) → await OnEscapeAsync(ct)
-    ///   while (!_async.isDone) yield return null → await _async.ToUniTask(ct)
-    /// </summary>
     private async UniTask LoadEmptySceneAsync(CancellationToken ct)
     {
         try
@@ -196,10 +183,7 @@ public class SceneChangeManager : MonoBehaviour
             // 현재 씬 탈출 훅 대기
             if (_sceneScriptsList.ContainsKey(nowSceneName))
                 await _sceneScriptsList[nowSceneName].OnEscapeAsync(ct);
-
-            // EmptyScene 비동기 로드 대기
-            // 기존: while (!_async.isDone) yield return null
-            // 변경: ToUniTask()가 isDone을 내부적으로 폴링하며 await
+                
             _async = SceneManager.LoadSceneAsync(Constant.S_EMPTY_SCENE_NAME);
             await _async.ToUniTask(cancellationToken: ct);
 
@@ -216,27 +200,13 @@ public class SceneChangeManager : MonoBehaviour
     {
         _async = null;
 
-        // 기존: StopCoroutine(_process); _process = null;
-        // 변경: _processCts는 LoadEmptySceneAsync finally에서 이미 정리됨
-
         if (string.IsNullOrEmpty(_nextSceneName)) return;
 
-        // 기존: StopCoroutine(_checkLoadScene); _checkLoadScene = StartCoroutine(CheckLoadScene(...))
-        // 변경: 기존 체크 태스크 취소 후 새로 시작
         CancelAndDispose(ref _checkLoadCts);
         _checkLoadCts = new CancellationTokenSource();
         CheckLoadSceneAsync(_nextSceneName, _checkLoadCts.Token).Forget();
     }
 
-    /// <summary>
-    /// [기존] private IEnumerator CheckLoadScene(string sceneName)
-    /// [변경] private async UniTask CheckLoadSceneAsync(string sceneName, CancellationToken ct)
-    ///
-    /// 핵심 변경점:
-    ///   while (true) yield return null → await UniTask.WaitUntilCanceled(ct)
-    ///   yield return SLEEP_TIME        → await UniTask.Delay(1000, ct)
-    ///   yield return StartCoroutine(OnEntry()) → await OnEntryAsync(ct)
-    /// </summary>
     private async UniTask CheckLoadSceneAsync(string sceneName, CancellationToken ct)
     {
         try
@@ -259,9 +229,7 @@ public class SceneChangeManager : MonoBehaviour
 
             // 하위 호환용 자동 등록
             TryAutoRegisterScript(sceneName);
-
-            // 기존: yield return SLEEP_TIME (WaitForSeconds(1))
-            // 변경: UniTask.Delay — 밀리초 단위, cancellationToken 지원
+            
             await UniTask.Delay(1000, cancellationToken: ct);
 
             // 씬 진입 훅 대기
