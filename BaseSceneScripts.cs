@@ -10,34 +10,15 @@ public abstract class BaseSceneScripts
     public virtual bool TouchEffectEnabled => true;
     public virtual SceneLoadingType LoadingType => SceneLoadingType.Default;
 
-    public virtual void Initialze(string sceneName)
-    {
-        _sceneName = sceneName;
-        _checkInit = true;
-    }
-
+    public virtual void Initialze(string n) { _sceneName = n; _checkInit = true; }
     public virtual void Release() { }
 
-    public virtual async UniTask OnEntryAsync(CancellationToken ct)
-    {
-        await UniTask.CompletedTask;
-    }
-
-    public virtual async UniTask OnEscapeAsync(CancellationToken ct)
-    {
-        await UniTask.CompletedTask;
-    }
-
-    public virtual async UniTask UpdateAsync(CancellationToken ct)
-    {
-        await UniTask.CompletedTask;
-    }
+    public virtual async UniTask OnEntryAsync(CancellationToken ct) { await UniTask.CompletedTask; }
+    public virtual async UniTask OnEscapeAsync(CancellationToken ct) { await UniTask.CompletedTask; }
+    public virtual async UniTask UpdateAsync(CancellationToken ct) { await UniTask.CompletedTask; }
 }
 
 public enum SceneLoadingType
 {
-    Default,
-    None,
-    MatchLoading,
-    NormalLoading,
+    Default, None, MatchLoading, NormalLoading
 }
